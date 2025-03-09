@@ -1,8 +1,8 @@
-# BombDrop: Apple mDNS Cache Pressure Tool
+# bombdrop: Apple mDNS Cache Pressure Tool
 
 ## Overview
 
-BombDrop is a network testing tool that demonstrates a vulnerability in Apple's mDNSResponder service, which can cause severe performance degradation across Apple devices. By generating a high volume of specially crafted mDNS (multicast DNS) announcements, this tool can overwhelm the mDNS cache in Apple devices, causing service disruption and affecting Bonjour/Air services.
+bombdrop is a network testing tool that demonstrates a vulnerability in Apple's mDNSResponder service, which can cause severe performance degradation across Apple devices across an entire network. By generating a high volume of specially crafted mDNS (multicast DNS) announcements, this tool can overwhelm the mDNS cache in Apple devices, causing service disruption and affecting Bonjour/Air services.
 
 ## Technical Background
 
@@ -34,7 +34,7 @@ static CacheEntity rrcachestorage[RR_CACHE_SIZE];
 #define kRRCacheGrowSize (sizeof(CacheEntity) * RR_CACHE_SIZE)
 ```
 
-From our code analysis, we can see the key implementation details:
+From our code analysis, I can see the key implementation details:
 
 1. **Pre-Request Condition**: The user must have an application open that interacts with mDNSResponder, such as opening AirPlay devices, using Apple Music, or even just browsing with Safari.
 
@@ -61,9 +61,16 @@ From our code analysis, we can see the key implementation details:
    - `mDNS_PurgeCacheResourceRecord` for purging records
    - Hash-based record lookup through `CacheGroupForName`
 
-### How BombDrop Exploits This
+### How bombdrop Exploits This
 
-BombDrop generates thousands of specially crafted mDNS announcements that:
+
+Note: Building bombdrop requires libpcap.
+
+```
+go run bombdrop.go -i ens160 -n 1000000 -type airplay -ttl-mode extreme -name-mode dynamic
+```
+
+This will generate 1 million airplay devices with a TTL of 10 seconds and a dynamic name.
 
 1. Use randomized device names to ensure uniqueness, preventing cache consolidation
 2. Set long TTLs to delay the `NextCacheCheck` time and prevent record expiration 
@@ -78,9 +85,15 @@ As the mDNSResponder's cache becomes overwhelmed:
 
 1. Cache lookups become increasingly expensive (traversing large hash chains)
 2. Memory usage increases, potentially reaching system limits
-3. The `NextCacheCheck` processing becomes more CPU intensive
-4. Network operations dependent on mDNS become sluggish or fail
-5. All Bonjour-based services experience degraded performance
+3. CPU on mDNSResponder is reached at 100% it appears to be single threaded. Once mDNSResponder is saturated, it can no longer respond to any other requests.
+4. The `NextCacheCheck` processing becomes more CPU intensive
+5. Network operations dependent on mDNS become sluggish or fail
+6. All Bonjour-based services experience degraded performance
+
+Sometimes mDNSResponder will not recover. I haven't figured out what the condition is that casues it, seems like when we mess around with different TTLs it hits some unrecoverable condition. Reboot or a kill -9 of mDNSResponder seems to fix it.
+
+I've also seen AppleTVs and iPhones crash when the attack is happening.
+
 
 ### Affected Versions
 
@@ -91,77 +104,20 @@ This vulnerability affects Apple operating systems with the identified mDNSRespo
 - tvOS (through at least 17.x)
 - watchOS (through at least 10.x)
 
+Apple M* chips seem to be impacted more than Intel chips. Not sure why but I didn't really test it extensively.
+
 ### Potential Mitigations
 
 Apple could enhance mDNSResponder's resilience by:
 
-1. Implementing consistent hard upper limits on cache size across all platforms
+1. Limit the nubmer of enteries a single IP can create. 
 2. Improving prioritization algorithms for cache entries under pressure
 3. Enhancing detection of suspicious mDNS traffic patterns
 4. Implementing rate limiting for incoming mDNS announcements
 5. Adding more aggressive expiration of less-used cache entries
+6. On iPhone and Safari etc... Create a fast path for DNS lookups that don't require the overhead of mDNSResponder.
+7. Make the client applications dispaly a max number of devices that are discovered. Maybe a hard limit to reduce the records being dispalyed in the GUI. 
+Example: Opening Airplay devices on iPhone during an attack can crash the phone or lock it up, triggering high CPU usage and heat
+8. Have an attack mode in mDNSResponder that snapshots a pior working cache while the attack is happening. 
 
-Until such improvements are available, network administrators can mitigate this by blocking unexpected multicast traffic on UDP port 5353 at network boundaries.
-
-## Key mDNSResponder Cache Components
-
-From our code analysis, we identified the primary components of the caching system:
-
-1. **Data Structures**:
-   - `CacheRecord` - Individual DNS record entries
-   - `CacheGroup` - Groups records with the same name
-   - `CacheEntity` - Union type that can represent either structure
-
-2. **Cache Management Functions**:
-   - `CacheGroupForName` - Finds the appropriate cache group for a name
-   - `CreateNewCacheEntry` - Adds new records to the cache
-   - `CheckCacheExpiration` - Manages record expiration
-   - `SetNextCacheCheckTimeForRecord` - Schedules record rechecking
-
-3. **Memory Management**:
-   - `mDNS_GrowCache` - Expands the cache when needed
-   - `ReleaseCacheRecord` - Frees cache record memory
-   - `GetCacheEntity` - Allocates or recycles cache entities
-
-4. **Cache Access**:
-   - `AnswerCurrentQuestionWithResourceRecord` - Provides cached answers
-   - `CacheRecordAnswersQuestion` - Checks if a record answers a query
-
-## mDNSResponder Code Structure
-
-```
-./mDNSResponder/
-├── mDNSCore/
-│   ├── mDNS.c                 // Core implementation
-│   ├── mDNSResponder.c        // Main daemon functionality 
-│   ├── CacheRecord.c          // Cache record handling
-│   ├── DNSCommon.c            // DNS message parsing
-│   └── uDNS.c                 // Unicast DNS support
-├── mDNSMacOSX/                // macOS specific implementation
-│   ├── mDNSMacOSX.c           // Platform integration 
-│   └── ...
-└── mDNSShared/
-    ├── dnssd_clientshim.c     // Client API implementation
-    └── ...
-```
-
-### Key Components
-
-1. **Cache record allocation and management**:
-   - Look for `CacheRecord` or `CacheEntry` structures
-   - Functions like `AddCacheEntry()`, `UpdateCacheRecord()`, or `mDNS_AddCacheEntry()`
-
-2. **Record eviction algorithms**:
-   - Functions with names like `ExpireCacheRecords()` or `PurgeCacheRecords()`
-   - Time-to-live (TTL) handling code
-
-3. **Memory management**:
-   - Look for memory allocation functions (`malloc`, `calloc`) for cache records
-   - Check if there are upper bounds on cache sizes
-
-4. **Hash table implementations**:
-   - Hash functions for DNS names (potential collision points)
-   - Hash table resize functions
-
-5. **Callback handling**:
-   - Look for client notification functions that might get overwhelmed
+Until such improvements are available, network administrators can mitigate this by blocking unexpected multicast traffic on UDP port 5353.
