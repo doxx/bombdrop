@@ -23,7 +23,8 @@ MACOS_DIR=$(BUILD_DIR)/macos
 WINDOWS_DIR=$(BUILD_DIR)/windows
 
 # Platforms to build for
-PLATFORMS=linux-amd64 linux-arm64 macos-amd64 macos-arm64 windows-amd64 windows-arm64
+#PLATFORMS=linux-amd64 linux-arm64 macos-amd64 macos-arm64 windows-amd64 windows-arm64
+PLATFORMS=macos-arm64
 
 # Default target
 .PHONY: all
