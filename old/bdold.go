@@ -333,73 +333,25 @@ func main() {
 	numDevices := flag.Int("n", 1000, "Number of devices to advertise")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	help := flag.Bool("h", false, "Show help")
-	interfaceName := flag.String("i", "", "Network interface to use (default: system chosen)")
-	broadcastIP := flag.String("b", "224.0.0.251", "Multicast/broadcast IP address")
 	flag.Parse()
 
-	// Show help if requested or no arguments provided
-	if *help || len(os.Args) == 1 {
+	if *help {
 		fmt.Println(`
 Bombdrop - mDNS Cache Pressure Tool
 
 Usage:
-  sudo go run main.go -n 5000 [-debug] [-i eth0] [-b 224.0.0.251]
+  sudo go run main.go -n 5000 [-debug]
 
 Options:
-  -n <num>    Number of devices to advertise (default: 1000)
+  -n <num>    Number of devices (default: 5000)
   -debug      Enable debug logging
-  -i <iface>  Network interface to use (default: system chosen)
-  -b <ip>     Multicast/broadcast IP address (default: 224.0.0.251)
-  -h          Show this help message
-
-Examples:
-  # Basic usage with 5000 devices
-  sudo go run main.go -n 5000
-
-  # Specify network interface
-  sudo go run main.go -i eth0 -n 1000
-
-  # Use broadcast instead of multicast (useful for some networks)
-  sudo go run main.go -b 192.168.1.255 -n 1000
-
-  # Use link-local multicast
-  sudo go run main.go -b 224.0.0.251 -n 1000
-
-Notes:
-  - For multicast: 224.0.0.251 is the standard mDNS address
-  - For broadcast: use your subnet's broadcast (typically x.x.x.255)
-  - For /31 networks: there is no broadcast address, use multicast or direct IP
-  - Root/admin privileges are usually required for multicast
 `)
 		return
 	}
 
-	// Setup network connection with interface if specified
-	var ifi *net.Interface
-	var err error
-
-	if *interfaceName != "" {
-		ifi, err = net.InterfaceByName(*interfaceName)
-		if err != nil {
-			log.Fatalf("Error finding interface %s: %v", *interfaceName, err)
-		}
-		if *debug {
-			log.Printf("Using interface: %s", *interfaceName)
-		}
-	}
-
-	// Parse the broadcast IP
-	broadcastIPAddr := net.ParseIP(*broadcastIP)
-	if broadcastIPAddr == nil {
-		log.Fatalf("Invalid broadcast IP address: %s", *broadcastIP)
-	}
-
-	if *debug {
-		log.Printf("Using broadcast IP: %s", broadcastIPAddr.String())
-	}
-
-	conn, err := net.ListenMulticastUDP("udp4", ifi, &net.UDPAddr{
-		IP:   broadcastIPAddr,
+	// Setup network connection
+	conn, err := net.ListenMulticastUDP("udp4", nil, &net.UDPAddr{
+		IP:   net.ParseIP("224.0.0.251"),
 		Port: 5353,
 	})
 	if err != nil {
@@ -408,7 +360,7 @@ Notes:
 	defer conn.Close()
 
 	mdnsAddr := &net.UDPAddr{
-		IP:   broadcastIPAddr,
+		IP:   net.ParseIP("224.0.0.251"),
 		Port: 5353,
 	}
 
