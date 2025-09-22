@@ -9,7 +9,6 @@ import (
 	"os"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
@@ -1327,19 +1326,7 @@ func generateDevices(count int, broadcastTypes []BroadcastType, ttl uint32, debu
 	return announcements
 }
 
-// Helper function to set the multicast interface
-func setMulticastInterface(conn *net.UDPConn, ifi *net.Interface) error {
-	file, err := conn.File()
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	fd := int(file.Fd())
-
-	// On Linux, we use the interface index with SetsockoptInt
-	return syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_MULTICAST_IF, ifi.Index)
-}
+// Helper function to set the multicast interface - implemented in platform-specific files
 
 // Adding a new function to pre-generate and cache a large number of device announcements
 func preGenerateDevices(count int, broadcastTypes []BroadcastType, ttl uint32, debug bool) []*dns.Msg {
