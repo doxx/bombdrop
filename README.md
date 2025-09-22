@@ -80,8 +80,7 @@ NOTE: Running this on MacOS will cause the mDNSResponder fight the POC. You shou
 For best results, use the following command:
 
 ```
-go run bombdrop.go -i <your interface> -n 1000000 -type airplay -ttl-mode extreme -name-mode dynamic
-```
+go run bombdrop.go -i <your interface> -n 1000000 -type airplay -ttl-mode extreme -name-mode dynami
 
 Other examples: 
 
@@ -180,3 +179,13 @@ One telling comment in Apple’s own source code reinforces this design flaw:
 ```
 
 This trust model, suitable for the early 2000s, no longer holds up in hostile or crowded networks like schools, Apple's own stores, airports, or ISP-shared segments. Apple should treat unsolicited multicast data with suspicion and enforce boundaries within mDNSResponder accordingly.
+
+### Related Projects
+
+If you like this work, please take a look at some of my other projects:
+
+Privacy Focused VPN and firewall piercing system: https://beta.doxx.net
+
+Browoser GPS Spoofing: https://github.com/doxx/doxx.net/tree/main/doxxulator
+
+Join us on Discord: https://discord.com/invite/Gr9rByrEzZ
