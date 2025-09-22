@@ -2,6 +2,19 @@
 
 ## Overview
 
+
+“Bombdrop: Weaponizing Multicast Against Apple’s mDNSResponder”
+How a 20-year-old trust assumption in Apple’s networking stack enables denial-of-service across entire device fleets.
+
+Disclosure Timeline (Apple mDNSResponder Vulnerability)
+March 2025: Reported a multicast-based denial-of-service vulnerability affecting Apple’s mDNSResponder. Provided full PoC, technical analysis, video demo, and diagnostic data.
+April–July 2025: Worked with Apple’s security team over several rounds of testing and feedback. Issue acknowledged. Apple indicated it would be addressed in macOS Tahoe 26.
+July 2025: Tested against the Tahoe 26 beta — issue remained reproducible. Shared updated results, including 99.9% CPU usage on mDNSResponder, persistent app hangs, and service crashes.
+September 2025: Apple closed the report and declined to issue a bounty. Their statement:
+“This report does not qualify for an Apple Security Bounty.”
+
+FOR RESEARCH PURPOSES ONLY.
+
 bombdrop is a security research tool that demonstrates a critical vulnerability in Apple's mDNSResponder service. This tool floods networks with specially crafted multicast DNS (mDNS) announcements that can overwhelm the cache management systems in Apple devices, causing network-wide service degradation.
 When executed on a local network, bombdrop can affect all connected Apple devices simultaneously, resulting in:
 
@@ -62,6 +75,15 @@ From our code analysis, I can see the key implementation details:
 
 ### How bombdrop Exploits This
 
+NOTE: Running this on MacOS will cause the mDNSResponder fight the POC. You should only run this on a Linux VM or a seperate system that doesn't run mDNSResponder as part of the core OS. 
+
+For best results, use the following command:
+
+```
+go run bombdrop.go -i <your interface> -n 1000000 -type airplay -ttl-mode extreme -name-mode dynamic
+```
+
+Other examples: 
 
 ```
 go run bombdrop.go -i ens160 -n 1000000 -type airplay -ttl-mode extreme -name-mode dynamic
@@ -77,9 +99,10 @@ Options:
   -debug           Enable debug logging
   -i <iface>       Network interface to use (default: system chosen)
   -b <ip>          Target IP address (default: 224.0.0.251)
+  -s <ip>          Source IP address (default: system chosen)
   -c <count>       Number of announcement rounds (0 = infinite)
   -type <t>        Broadcast type: airplay, airdrop, homekit, airprint, or all (default: all)
-  -spoof           Enable IP address spoofing (requires root/admin privileges)
+  -spoof <network> Enable IP address spoofing with network CIDR (e.g., -spoof 192.168.1.0/24)
   -ttl <seconds>   TTL value in seconds (default: 7200)
   -ttl-mode <mode> TTL mode: normal, long, extreme (default: normal)
   -name-mode <m>   Device naming mode: static, dynamic, compare (default: mixed)
