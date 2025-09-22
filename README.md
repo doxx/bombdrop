@@ -13,7 +13,7 @@ July 2025: Tested against the Tahoe 26 beta — issue remained reproducible. Sha
 September 2025: Apple closed the report and declined to issue a bounty. Their statement:
 “This report does not qualify for an Apple Security Bounty.”
 
-FOR RESEARCH PURPOSES ONLY.
+**FOR RESEARCH PURPOSES ONLY.**
 
 bombdrop is a security research tool that demonstrates a critical vulnerability in Apple's mDNSResponder service. This tool floods networks with specially crafted multicast DNS (mDNS) announcements that can overwhelm the cache management systems in Apple devices, causing network-wide service degradation.
 When executed on a local network, bombdrop can affect all connected Apple devices simultaneously, resulting in:
@@ -170,16 +170,13 @@ Apple M* chips seem to be impacted more than Intel chips. Not sure why but I did
 
 ### Potential Mitigations
 
-Apple could enhance mDNSResponder's resilience by:
+In my disclosure to Apple, I proposed several mitigations to improve mDNSResponder’s resilience under cache exhaustion, including: limiting the number of records accepted per source IP or MAC, rate-limiting high-volume multicast announcements, improving eviction priority in cache management, and implementing stricter TTL handling to avoid record retention abuse. I also pointed out that mDNSResponder processes multicast traffic without scrutiny, on a single thread, and trusts all records equally — a dangerous assumption in 2025’s untrusted network environments.
+One telling comment in Apple’s own source code reinforces this design flaw:
 
-1. Limit the nubmer of enteries a single IP can create. 
-2. Improving prioritization algorithms for cache entries under pressure
-3. Enhancing detection of suspicious mDNS traffic patterns
-4. Implementing rate limiting for incoming mDNS announcements
-5. Adding more aggressive expiration of less-used cache entries
-6. On iPhone and Safari etc... Create a fast path for DNS lookups that don't require the overhead of mDNSResponder.
-7. Make the client applications dispaly a max number of devices that are discovered. Maybe a hard limit to reduce the records being dispalyed in the GUI. 
-Example: Opening Airplay devices on iPhone during an attack can crash the phone or lock it up, triggering high CPU usage and heat
-8. Have an attack mode in mDNSResponder that snapshots a pior working cache while the attack is happening. 
+```
+// All records in a DNS response packet are treated as equally valid statements of truth. If we want
+// to guard against spoof responses, then the only credible protection against that is cryptographic
+// security, e.g. DNSSEC., not worrying about which section in the spoof packet contained the record.
+```
 
-Until such improvements are available, network administrators can mitigate this by blocking unexpected multicast traffic on UDP port 5353.
+This trust model, suitable for the early 2000s, no longer holds up in hostile or crowded networks like schools, Apple's own stores, airports, or ISP-shared segments. Apple should treat unsolicited multicast data with suspicion and enforce boundaries within mDNSResponder accordingly.
