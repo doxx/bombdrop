@@ -1,3 +1,7 @@
+**Join the movement for privacy and free speech — [doxx.net VPN](https://beta.doxx.net)**  
+[Join us on Discord](https://discord.com/invite/Gr9rByrEzZ)
+
+
 # bombdrop: Apple mDNS Cache Pressure Tool
 
 ## Overview
@@ -189,6 +193,6 @@ If you like this work, please take a look at some of my other projects:
 
 Privacy Focused VPN and firewall piercing system: https://beta.doxx.net
 
-Browoser GPS Spoofing: https://github.com/doxx/doxx.net/tree/main/doxxulator
+Browser GPS Spoofing: https://github.com/doxx/doxx.net/tree/main/doxxulator
 
 Join us on Discord: https://discord.com/invite/Gr9rByrEzZ
