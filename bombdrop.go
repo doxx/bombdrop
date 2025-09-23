@@ -189,7 +189,6 @@ const (
 func broadcastAnnouncements(conn *net.UDPConn, announcements []*dns.Msg, nameMode string, roundNum int, debug bool) {
 	startTime := time.Now()
 	announcementCount := 0
-	destAddr := &net.UDPAddr{IP: net.ParseIP("224.0.0.251"), Port: 5353}
 
 	for i, announcement := range announcements {
 		announcementBytes, err := announcement.Pack()
@@ -208,12 +207,12 @@ func broadcastAnnouncements(conn *net.UDPConn, announcements []*dns.Msg, nameMod
 					log.Printf("Error sending spoofed packet: %v", err)
 					log.Printf("Falling back to regular UDP")
 				}
-				// Fallback to regular UDP
-				conn.WriteToUDP(announcementBytes, destAddr)
+				// Fallback to regular UDP - use Write() for connected socket
+				conn.Write(announcementBytes)
 			}
 		} else {
-			// Use regular UDP socket
-			if _, err := conn.WriteToUDP(announcementBytes, destAddr); err != nil {
+			// Use regular UDP socket - use Write() for connected socket
+			if _, err := conn.Write(announcementBytes); err != nil {
 				if debug {
 					log.Printf("Error sending announcement: %v", err)
 				}
@@ -1249,10 +1248,10 @@ func handleResponses(conn *net.UDPConn, mdnsAddr *net.UDPAddr) {
 					createQuery(name, dns.TypeSRV),
 					createQuery(name, dns.TypeTXT),
 				}
-				for _, q := range queries {
-					queryBytes, _ := q.Pack()
-					conn.WriteToUDP(queryBytes, mdnsAddr)
-				}
+			for _, q := range queries {
+				queryBytes, _ := q.Pack()
+				conn.Write(queryBytes)
+			}
 			}
 		}
 	}
@@ -1268,7 +1267,7 @@ func sendQueries(conn *net.UDPConn, mdnsAddr *net.UDPAddr, queries []*dns.Msg, r
 		if err != nil {
 			continue
 		}
-		conn.WriteToUDP(queryBytes, mdnsAddr)
+	conn.Write(queryBytes)
 	}
 }
 
